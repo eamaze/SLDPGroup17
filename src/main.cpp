@@ -11,7 +11,7 @@
 // --- NEW: TARGET LED SETTINGS ---
 #define LED_PIN 2                 // GPIO for the LED (Pin 2 is usually the onboard LED)
 const float TARGET_FREQ = 440.0;  // The target frequency in Hz (440.0 = Note A4)
-const float TOLERANCE = 5.0;      // Allow +/- 5 Hz of wiggle room for the note
+const float TOLERANCE = 50;      // Allow +/- 5 Hz of wiggle room for the note
 
 // --- PITCH RECOGNITION SETTINGS ---
 const uint16_t SAMPLES = 1024; 
