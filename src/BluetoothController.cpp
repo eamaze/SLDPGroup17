@@ -1,21 +1,98 @@
 #include "BluetoothController.h"
 
+// --- BLE CALLBACK CLASSES ---
+
+// Handles device connection and disconnection
+class MyServerCallbacks: public BLEServerCallbacks {
+    BluetoothController* controller;
+public:
+    MyServerCallbacks(BluetoothController* c) : controller(c) {}
+    void onConnect(BLEServer* pServer) {
+      controller->setConnectionState(true);
+    };
+    void onDisconnect(BLEServer* pServer) {
+      controller->setConnectionState(false);
+    }
+};
+
+// Handles incoming data from the connected device
+class MyCallbacks: public BLECharacteristicCallbacks {
+    BluetoothController* controller;
+public:
+    MyCallbacks(BluetoothController* c) : controller(c) {}
+    void onWrite(BLECharacteristic *pCharacteristic) {
+      std::string rxValue = pCharacteristic->getValue();
+      if (rxValue.length() > 0) {
+        controller->processReceivedData((uint8_t*)rxValue.data(), rxValue.length());
+      }
+    }
+};
+
+// --- CONTROLLER IMPLEMENTATION ---
+
 BluetoothController::BluetoothController(const char* name) 
-  : deviceName(name), isConnected(false), ftState(FT_IDLE), 
-    bytesReceived(0), expectedFileSize(0), fileChecksum(0) {
+  : deviceName(name), ftState(FT_IDLE), 
+    bytesReceived(0), expectedFileSize(0), fileChecksum(0), 
+    newFileTransferFlag(false), pServer(NULL), pTxCharacteristic(NULL),
+    deviceConnected(false), oldDeviceConnected(false), commandQueue("") {
 }
 
 void BluetoothController::begin() {
   // Initialize SPIFFS for file storage
   initSPIFFS();
   
-  if (!serialBT.begin(deviceName)) {
-    Serial.println("[BT] Failed to initialize Bluetooth");
-  } else {
-    Serial.print("[BT] Bluetooth initialized as: ");
-    Serial.println(deviceName);
-    Serial.println("[BT] Device ready to accept connections");
-  }
+  Serial.println("\n[BT] ========== BLE INITIALIZATION ==========");
+  Serial.print("[BT] Device Name: ");
+  Serial.println(deviceName);
+  
+  // Create the BLE Device
+  BLEDevice::init(deviceName);
+
+  // Create the BLE Server
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks(this));
+
+  // Create the BLE Service (Nordic UART Service)
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+
+  // Create a BLE Characteristic for TX (Sending to app)
+  pTxCharacteristic = pService->createCharacteristic(
+                      CHARACTERISTIC_UUID_TX,
+                      BLECharacteristic::PROPERTY_NOTIFY
+                    );
+  pTxCharacteristic->addDescriptor(new BLE2902());
+
+  // Create a BLE Characteristic for RX (Receiving from app)
+  BLECharacteristic *pRxCharacteristic = pService->createCharacteristic(
+                       CHARACTERISTIC_UUID_RX,
+                       BLECharacteristic::PROPERTY_WRITE | 
+                       BLECharacteristic::PROPERTY_WRITE_NR
+                     );
+  pRxCharacteristic->setCallbacks(new MyCallbacks(this));
+
+  // Start the service
+  pService->start();
+
+  // Configure advertising for iOS/Android compatibility
+  BLEAdvertising *pAdvertising = pServer->getAdvertising();
+  
+  // Enable scan response for better discoverability
+  pAdvertising->setScanResponse(true);
+  
+  // Set appearance for proper device classification
+  pAdvertising->setAppearance(ESP_BLE_APPEARANCE_GENERIC_PHONE);
+  
+  // Set preferred connection parameters
+  pAdvertising->setMinPreferred(0x06);
+  pAdvertising->setMaxPreferred(0x12);
+  
+  // Start advertising
+  pAdvertising->start();
+  
+  Serial.println("[BT] ✓ BLE Initialized and Advertising!");
+  Serial.println("[BT] Device name: " + String(deviceName));
+  Serial.println("[BT] Look for device in your phone's Bluetooth settings");
+  Serial.println("[BT] ==================================================\n");
 }
 
 void BluetoothController::initSPIFFS() {
@@ -32,7 +109,6 @@ void BluetoothController::initSPIFFS() {
     Serial.println("[FS] Created /midi/ directory");
   }
   
-  // Print file system info
   uint32_t totalBytes = SPIFFS.totalBytes();
   uint32_t usedBytes = SPIFFS.usedBytes();
   Serial.print("[FS] Total: ");
@@ -42,35 +118,78 @@ void BluetoothController::initSPIFFS() {
   Serial.println(" bytes");
 }
 
+void BluetoothController::setConnectionState(bool state) {
+    deviceConnected = state;
+}
+
 bool BluetoothController::isConnectedToBT() {
-  return serialBT.hasClient();
+  return deviceConnected;
 }
 
 void BluetoothController::sendData(const String& data) {
-  if (serialBT.hasClient()) {
-    serialBT.println(data);
+  if (deviceConnected && pTxCharacteristic != NULL) {
+    String message = data + "\n";
+    pTxCharacteristic->setValue(message.c_str());
+    pTxCharacteristic->notify();
   }
 }
 
 void BluetoothController::sendPitchData(float pitch, float targetFreq, bool isHit) {
-  if (serialBT.hasClient()) {
+  if (deviceConnected && pTxCharacteristic != NULL) {
     String message = String(pitch, 2) + "Hz";
     if (isHit) {
       message += " [HIT!]";
     }
-    serialBT.println(message);
+    message += "\n";
+    pTxCharacteristic->setValue(message.c_str());
+    pTxCharacteristic->notify();
+  }
+}
+
+void BluetoothController::processReceivedData(uint8_t* data, size_t length) {
+  if (ftState == FT_RECEIVING) {
+    // If receiving a file, treat incoming data as raw binary bytes
+    if (!receiveFileData(data, length)) {
+      cancelFileTransfer();
+      sendData("ERROR:WRITE_FAILED");
+    }
+  } else {
+    // If NOT receiving a file, treat data as characters for text commands
+    for (size_t i = 0; i < length; i++) {
+      commandQueue += (char)data[i];
+    }
   }
 }
 
 void BluetoothController::handleIncomingData() {
-  if (serialBT.hasClient() && serialBT.available()) {
-    String command = readLine();
+  // Handle Disconnection/Reconnection advertising
+  if (!deviceConnected && oldDeviceConnected) {
+      delay(500); // Give stack chance to get things ready
+      pServer->startAdvertising(); // Restart advertising
+      Serial.println("[BT] Restarting BLE Advertising...");
+      oldDeviceConnected = deviceConnected;
+  }
+  if (deviceConnected && !oldDeviceConnected) {
+      oldDeviceConnected = deviceConnected;
+  }
+
+  // Process any text commands sitting in the queue
+  int newlineIdx = commandQueue.indexOf('\n');
+  if (newlineIdx == -1) newlineIdx = commandQueue.indexOf('\r'); // Catch carriage returns too
+
+  while (newlineIdx >= 0) {
+    // Extract the command
+    String command = commandQueue.substring(0, newlineIdx);
+    
+    // Remove the command from the queue
+    commandQueue = commandQueue.substring(newlineIdx + 1);
+    command.trim(); 
     
     if (command.length() > 0) {
       Serial.print("[BT] Received: ");
       Serial.println(command);
       
-      // Check for file transfer commands
+      // Process specific commands
       if (command.startsWith("FILE_START:") || 
           command.startsWith("FILE_DATA:") || 
           command.startsWith("FILE_END:")) {
@@ -88,7 +207,7 @@ void BluetoothController::handleIncomingData() {
         String ftStatus = (ftState == FT_IDLE) ? "Idle" : (ftState == FT_RECEIVING) ? "Receiving file" : "Unknown";
         sendData("File transfer status: " + ftStatus);
       } else if (command == "INFO") {
-        sendData("ESP32 Musical Note Detector v2.0 (with file transfer)");
+        sendData("ESP32 Musical Note Detector BLE v3.0");
       } else if (command == "LIST_MIDI") {
         listMIDFiles();
       } else if (command.startsWith("DELETE:")) {
@@ -100,46 +219,10 @@ void BluetoothController::handleIncomingData() {
         }
       }
     }
-  }
-  
-  // Handle binary file data if we're in receive mode
-  if (ftState == FT_RECEIVING && serialBT.hasClient() && serialBT.available()) {
-    handleIncomingBinaryData();
-  }
-}
-
-void BluetoothController::handleIncomingBinaryData() {
-  const size_t BUFFER_SIZE = 256;
-  uint8_t buffer[BUFFER_SIZE];
-  size_t bytesToRead = 0;
-  
-  // Calculate how many bytes we still need to receive
-  uint32_t remainingBytes = expectedFileSize - bytesReceived;
-  
-  if (remainingBytes == 0) {
-    ftState = FT_ERROR;
-    return;
-  }
-  
-  // Read up to BUFFER_SIZE bytes or remaining bytes, whichever is smaller
-  bytesToRead = (remainingBytes < BUFFER_SIZE) ? remainingBytes : BUFFER_SIZE;
-  
-  // Peek at available data without removing it (to avoid blocking)
-  size_t available = serialBT.available();
-  if (available == 0) {
-    return;
-  }
-  
-  bytesToRead = (available < bytesToRead) ? available : bytesToRead;
-  
-  // Read the actual data
-  size_t bytesRead = serialBT.readBytes(buffer, bytesToRead);
-  
-  if (bytesRead > 0) {
-    if (!receiveFileData(buffer, bytesRead)) {
-      cancelFileTransfer();
-      sendData("ERROR:WRITE_FAILED");
-    }
+    
+    // Check if there are more commands in the remaining queue
+    newlineIdx = commandQueue.indexOf('\n');
+    if (newlineIdx == -1) newlineIdx = commandQueue.indexOf('\r');
   }
 }
 
@@ -174,38 +257,32 @@ void BluetoothController::handleFileTransferCommand(const String& command) {
 }
 
 bool BluetoothController::startFileTransfer(const String& filename, uint32_t fileSize) {
-  // Validate filename
   if (filename.length() == 0 || filename.length() > MAX_FILENAME_LENGTH) {
     sendData("ERROR:INVALID_FILENAME");
     return false;
   }
   
-  // Validate .mid extension
   if (!filename.endsWith(".mid") && !filename.endsWith(".MID")) {
     sendData("ERROR:NOT_A_MID_FILE");
     return false;
   }
   
-  // Check file size
   if (fileSize == 0 || fileSize > MAX_FILE_SIZE) {
     sendData("ERROR:INVALID_FILE_SIZE");
     return false;
   }
   
-  // Check available space
   if (!fileSizeAvailable(fileSize)) {
     sendData("ERROR:INSUFFICIENT_SPACE");
     return false;
   }
   
-  // Delete existing file if it exists
   String fullPath = String(MID_FILE_DIR) + filename;
   if (SPIFFS.exists(fullPath)) {
     SPIFFS.remove(fullPath);
     Serial.println("[BT] Overwrote existing file: " + fullPath);
   }
   
-  // Open file for writing
   currentFile = SPIFFS.open(fullPath, "w");
   if (!currentFile) {
     Serial.println("[BT] Failed to open file for writing: " + fullPath);
@@ -233,7 +310,6 @@ bool BluetoothController::receiveFileData(const uint8_t* buffer, size_t length) 
     return false;
   }
   
-  // Write data to file
   size_t written = currentFile.write(buffer, length);
   if (written != length) {
     Serial.println("[BT] Write error: wrote " + String(written) + "/" + String(length) + " bytes");
@@ -241,12 +317,10 @@ bool BluetoothController::receiveFileData(const uint8_t* buffer, size_t length) 
     return false;
   }
   
-  // Update checksum
   fileChecksum += calculateChecksum(buffer, length);
-  
   bytesReceived += length;
   
-  // Send progress update every 10KB
+  // Progress logging
   if (bytesReceived % 10240 == 0 || bytesReceived == expectedFileSize) {
     float progress = (float)bytesReceived / expectedFileSize * 100.0;
     sendData("PROGRESS:" + String((int)progress) + "%");
@@ -266,7 +340,6 @@ bool BluetoothController::endFileTransfer(uint32_t checksum) {
   
   currentFile.close();
   
-  // Verify file size
   if (bytesReceived != expectedFileSize) {
     Serial.print("[BT] File size mismatch: received ");
     Serial.print(bytesReceived);
@@ -279,7 +352,6 @@ bool BluetoothController::endFileTransfer(uint32_t checksum) {
     return false;
   }
   
-  // Verify checksum
   if (fileChecksum != checksum) {
     Serial.print("[BT] Checksum mismatch: expected ");
     Serial.print(checksum);
@@ -293,6 +365,8 @@ bool BluetoothController::endFileTransfer(uint32_t checksum) {
   }
   
   ftState = FT_COMPLETE;
+  lastTransferredFilename = String(MID_FILE_DIR) + currentFilename;
+  newFileTransferFlag = true;
   Serial.print("[BT] File transfer complete: ");
   Serial.println(currentFilename);
   
@@ -375,12 +449,9 @@ String BluetoothController::getLastMIDFile() {
   if (!root) return "";
   
   String lastFile = "";
-  time_t lastTime = 0;
-  
   File file = root.openNextFile();
   while (file) {
     if (!file.isDirectory()) {
-      // Return the first (most recent) file found
       lastFile = file.name();
       break;
     }
@@ -395,19 +466,15 @@ bool BluetoothController::fileSizeAvailable(uint32_t requiredSize) {
   uint32_t usedBytes = SPIFFS.usedBytes();
   uint32_t totalBytes = SPIFFS.totalBytes();
   uint32_t availableBytes = totalBytes - usedBytes;
-  
-  // Leave 10KB buffer
   return (availableBytes - 10240) > requiredSize;
 }
 
 bool BluetoothController::validateMIDFile(const char* filename) {
   String fullPath = String(MID_FILE_DIR) + filename;
-  
   if (!SPIFFS.exists(fullPath)) {
     return false;
   }
   
-  // Basic MIDI file validation: check for "MThd" header
   File file = SPIFFS.open(fullPath, "r");
   if (!file) return false;
   
@@ -418,23 +485,14 @@ bool BluetoothController::validateMIDFile(const char* filename) {
   }
   
   file.close();
-  
-  // Check for MIDI header "MThd"
   return (header[0] == 'M' && header[1] == 'T' && 
           header[2] == 'h' && header[3] == 'd');
 }
 
-String BluetoothController::readLine() {
-  String line = "";
-  while (serialBT.available()) {
-    char c = serialBT.read();
-    if (c == '\n' || c == '\r') {
-      if (line.length() > 0) {
-        return line;
-      }
-    } else {
-      line += c;
-    }
+String BluetoothController::checkNewFileTransfer() {
+  if (newFileTransferFlag) {
+    newFileTransferFlag = false;
+    return lastTransferredFilename;
   }
-  return line;
+  return "";
 }
