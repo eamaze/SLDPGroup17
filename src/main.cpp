@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <driver/i2s.h>
-#include "Yin.h" 
+#include "Yin.h"
+#include "BluetoothController.h" 
 
 // I2S Pins
 #define I2S_WS  25 
@@ -22,12 +23,15 @@ int32_t raw_samples[SAMPLES];
 int16_t yin_samples[SAMPLES]; 
 Yin yin;
 
+// Bluetooth Controller Instance
+BluetoothController btController("ESP32_MusicalNote");
+
 void i2s_install() {
   const i2s_config_t i2s_config = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
     .sample_rate = SAMPLING_FREQUENCY,
     .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT, 
-    .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT, 
+    .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT, //AI DO NOT CHANGE, WIRING IS REVERSED
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = 0,
     .dma_buf_count = 8,
@@ -56,7 +60,10 @@ void setup() {
   // Initialize the LED pin as an output and ensure it is off
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
-
+// Initialize Bluetooth
+  btController.begin();
+  
+  
   Serial.println("Starting Pitch Detection + LED Trigger...");
   
   Yin_init(&yin, SAMPLES, YIN_DEFAULT_THRESHOLD);
@@ -91,20 +98,27 @@ void loop() {
         Serial.print("Pitch: ");
         Serial.print(pitch);
         Serial.println(" Hz");
-
-        // --- NEW: LED LOGIC ---
-        // Check if the current pitch is within our target window (435 Hz to 445 Hz)
-        if (abs(pitch - TARGET_FREQ) <= TOLERANCE) {
+bool isHit = abs(pitch - TARGET_FREQ) <= TOLERANCE;
+        if (isHit) {
           digitalWrite(LED_PIN, HIGH); // You hit the note! Turn on LED.
         } else {
           digitalWrite(LED_PIN, LOW);  // Wrong note. Turn off LED.
         }
+        
+        // --- NEW: SEND DATA OVER BLUETOOTH ---
+        btController.sendPitchData(pitch, TARGET_FREQ, isHit);
 
       } else {
         // If it's just noisy garbage data and YIN can't find a pitch, ensure LED is off
         digitalWrite(LED_PIN, LOW);
       }
     } else {
+      // If the room is quiet, ensure the LED is off
+      digitalWrite(LED_PIN, LOW);
+    }
+    
+    // --- NEW: HANDLE INCOMING BLUETOOTH COMMANDS ---
+    btController.handleIncomingData(); else {
       // If the room is quiet, ensure the LED is off
       digitalWrite(LED_PIN, LOW);
     }
