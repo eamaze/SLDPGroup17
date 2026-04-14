@@ -57,7 +57,7 @@ private:
     void handleFileTransferCommand(const String& command);
 
 public:
-    BluetoothController(const char* name = "ESP32_MusicalNote");
+    BluetoothController(const char* name = "KEYSTROKE-DEVICE");
     
     void begin();
     
@@ -88,14 +88,9 @@ public:
     String checkNewFileTransfer();
     
     // Check current file transfer state
-    FileTransferState getFileTransferState() const {
-        return ftState;
-    }
+    FileTransferState getFileTransferState() const;
     
     // Get the last successfully transferred file
-    String getLastTransferredFile() const {
-        return currentFilename;
-    }
+    String getLastTransferredFile() const;
 };
-
 #endif
