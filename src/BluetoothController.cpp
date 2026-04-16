@@ -43,7 +43,9 @@ BluetoothController::BluetoothController(const char* name) :
     bytesReceived(0),
     expectedFileSize(0),
     fileChecksum(0),
-    newFileTransferFlag(false) {
+    newFileTransferFlag(false),
+    currentBPM(120),          // ADDED: Default BPM
+    startCommandFlag(false) { // ADDED: Start flag defaults to false
 }
 
 
@@ -180,6 +182,8 @@ void BluetoothController::handleFileTransferCommand(const String& command) {
     // END|<checksum>
     // CANCEL
     // LIST
+    // BPM:<bpm_value>
+    // START
     
     if (command.startsWith("START|")) {
         int firstPipe = command.indexOf('|');
@@ -212,6 +216,17 @@ void BluetoothController::handleFileTransferCommand(const String& command) {
     }
     else if (command == "LIST") {
         listMIDFiles();
+    }
+    // ADDED: BPM Command Parsing
+    else if (command.startsWith("BPM:")) {
+        currentBPM = command.substring(4).toInt();
+        if (currentBPM == 0) currentBPM = 120; // Fallback so we don't divide by zero
+        Serial.printf("[BT] Received new BPM: %d\n", currentBPM);
+    }
+    // ADDED: Playback Start Command Parsing
+    else if (command == "START") {
+        startCommandFlag = true;
+        Serial.println("[BT] Received playback START command");
     }
 }
 
@@ -360,6 +375,19 @@ FileTransferState BluetoothController::getFileTransferState() const {
 
 String BluetoothController::getLastTransferredFile() const {
     return lastTransferredFilename;
+}
+
+// --- ADDED: Playback Specific State Checks ---
+uint16_t BluetoothController::getBPM() const {
+    return currentBPM;
+}
+
+bool BluetoothController::checkStartCommand() {
+    if (startCommandFlag) {
+        startCommandFlag = false; // Reset the flag automatically upon reading
+        return true;
+    }
+    return false;
 }
 
 
