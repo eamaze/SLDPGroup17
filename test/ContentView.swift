@@ -195,14 +195,14 @@ struct ContentView: View {
         do {
             let midiData = try Data(contentsOf: url)
 
-            // 1) Send a small metadata JSON that includes tempo.
-            let meta: [String: Any] = [
-                "filename": "testMID.mid",
-                "tempoBPM": tempoBPM
-            ]
-            let metaData = try JSONSerialization.data(withJSONObject: meta, options: [])
-            ble.fileTransferProtocol = .pipe   // IMPORTANT: matches START| / END|
-            ble.sendFile(filename: "testMID.meta.json", data: metaData)
+            // Ensure we are using the same protocol as the ESP32 expects
+            ble.fileTransferProtocol = .pipe
+
+            // 1) Send BPM as a plain command (Arduino expects: BPM:<n>)
+            ble.sendCommandLine("BPM:\(tempoBPM)")
+
+            // Optional: small delay to avoid interleaving the BPM line and START| header
+            usleep(50_000) // 50ms
 
             // 2) Send the MIDI file.
             ble.sendFile(filename: "testMID.mid", data: midiData)
