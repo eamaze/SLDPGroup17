@@ -1,143 +1,118 @@
 #include "SongManager.h"
 
-SongManager::SongManager() 
-    : currentNoteIndex(0), currentTargetFreq(440.0), currentTargetNote(69), 
-      state(SONG_IDLE), noteHitTime(0), noteJustHit(false) {
+SongManager::SongManager(LedController* ledController) 
+    : leds(ledController), state(SONG_IDLE), startTime(0), 
+      leniencyWindow(150), audioLatencyOffset(50), frequencyTolerance(25.0),
+      hitCount(0), missCount(0) {
 }
 
-bool SongManager::loadSong(const char* filename) {
-    // Try to parse the MIDI file
-    if (!parser.parseMidiFile(filename)) {
-        Serial.println("[SONG] Failed to parse MIDI file: " + String(filename));
+bool SongManager::loadSong(const char* filename, uint16_t bpm) {
+    if (!parser.parseMidiFile(filename, bpm)) {
+        Serial.println("[SONG] Failed to parse MIDI file.");
         state = SONG_IDLE;
         return false;
     }
     
-    // Get the parsed note sequence
-    noteSequence = parser.getNoteSequence();
-    
-    if (noteSequence.empty()) {
+    if (parser.getNoteCount() == 0) {
         Serial.println("[SONG] No notes found in MIDI file");
         state = SONG_IDLE;
         return false;
     }
     
-    // Set up to start from the beginning
-    currentNoteIndex = 0;
-    currentTargetNote = noteSequence[0].highestNote;
-    currentTargetFreq = noteSequence[0].targetFrequency;
     currentSongFilename = String(filename);
-    state = SONG_LOADED;
-    noteJustHit = false;
+    resetSong(); // Resets counters and states
     
-    Serial.print("[SONG] Loaded song: ");
-    Serial.print(filename);
-    Serial.print(" with ");
-    Serial.print(noteSequence.size());
-    Serial.println(" notes");
-    
-    Serial.print("[SONG] First note: MIDI ");
-    Serial.print(currentTargetNote);
-    Serial.print(" (");
-    Serial.print(currentTargetFreq, 1);
-    Serial.println(" Hz)");
-    
+    Serial.printf("[SONG] Loaded %s with %d notes at %d BPM\n", filename, parser.getNoteCount(), bpm);
     return true;
 }
 
-bool SongManager::noteHit() {
-    if (state == SONG_IDLE || noteSequence.empty()) {
-        return false;
+void SongManager::startPlaying() {
+    if (state == SONG_LOADED) {
+        state = SONG_PLAYING;
+        startTime = millis();
+        Serial.println("[SONG] Playhead STARTED!");
+    }
+}
+
+void SongManager::updatePlayhead(float currentPitch) {
+    if (state != SONG_PLAYING) return;
+    
+    // Current logical time in the song, accounting for processing latency
+    long currentPlayTime = (long)(millis() - startTime) - (long)audioLatencyOffset;
+    
+    std::vector<NoteEvent>& sequence = parser.getMutableNoteSequence();
+    bool allEvaluated = true;
+    
+    for (auto& note : sequence) {
+        if (note.evaluated) continue;
+        
+        allEvaluated = false; // We found a note that still needs processing
+        long timeDiff = currentPlayTime - (long)note.timeMs;
+        
+        // 1. Target Window Approaching: Turn on White LED slightly early so user can prepare
+        if (timeDiff >= -500 && timeDiff < -leniencyWindow) {
+            leds->setTargetNote(note.highestNote, true);
+        }
+        
+        // 2. Active Leniency Window (Hit Box)
+        if (abs(timeDiff) <= leniencyWindow) {
+            // Ensure white LED is on
+            leds->setTargetNote(note.highestNote, true);
+            
+            // Check for hit
+            if (currentPitch > 0 && abs(currentPitch - note.targetFrequency) <= frequencyTolerance) {
+                note.hit = true;
+                note.evaluated = true;
+                hitCount++;
+                
+                Serial.printf("[HIT] Note %d / Freq %.1f\n", note.highestNote, note.targetFrequency);
+                leds->setTargetNote(note.highestNote, false); // Turn off white LED on hit
+            }
+        }
+        
+        // 3. Window Passed (Miss)
+        else if (timeDiff > leniencyWindow) {
+            note.evaluated = true;
+            missCount++;
+            
+            Serial.printf("[MISS] Note %d\n", note.highestNote);
+            leds->setTargetNote(note.highestNote, false); // Turn off white LED
+            leds->triggerMiss(note.highestNote);          // Pulse red LED
+        }
+        
+        // Minor optimization: Notes are chronological. If a note is way in the future, stop checking.
+        if (timeDiff < -500) break; 
     }
     
-    Serial.print("[SONG] Note hit! Index ");
-    Serial.print(currentNoteIndex);
-    Serial.print(" of ");
-    Serial.print(noteSequence.size());
-    Serial.println();
-    
-    // Mark when note was hit for LED confirmation
-    noteHitTime = millis();
-    noteJustHit = true;
-    state = SONG_PLAYING;
-    
-    // Check if this is the last note
-    if (isLastNote()) {
-        Serial.println("[SONG] *** SONG COMPLETED! ***");
+    // Check for song end
+    if (allEvaluated) {
         state = SONG_FINISHED;
-        return false;  // No more notes
+        leds->clearAll();
+        Serial.printf("[SONG] COMPLETED! Accuracy: %.1f%%\n", getAccuracy());
     }
-    
-    // Move to next note
-    currentNoteIndex++;
-    if (currentNoteIndex < noteSequence.size()) {
-        currentTargetNote = noteSequence[currentNoteIndex].highestNote;
-        currentTargetFreq = noteSequence[currentNoteIndex].targetFrequency;
-        
-        Serial.print("[SONG] Next note: MIDI ");
-        Serial.print(currentTargetNote);
-        Serial.print(" (");
-        Serial.print(currentTargetFreq, 1);
-        Serial.print(" Hz) at index ");
-        Serial.println(currentNoteIndex);
-        
-        return true;  // More notes to play
-    }
-    
-    return false;  // No more notes
 }
 
-bool SongManager::shouldShowConfirmation() const {
-    if (!noteJustHit) {
-        return false;
-    }
-    
-    unsigned long elapsed = millis() - noteHitTime;
-    return elapsed < CONFIRMATION_DURATION;
+float SongManager::getAccuracy() const {
+    uint16_t total = parser.getNoteCount();
+    if (total == 0) return 0.0;
+    return ((float)hitCount / total) * 100.0;
 }
 
-void SongManager::restartSong() {
-    if (noteSequence.empty()) {
-        return;
+void SongManager::resetSong() {
+    std::vector<NoteEvent>& sequence = parser.getMutableNoteSequence();
+    for (auto& note : sequence) {
+        note.evaluated = false;
+        note.hit = false;
     }
-    
-    currentNoteIndex = 0;
-    currentTargetNote = noteSequence[0].highestNote;
-    currentTargetFreq = noteSequence[0].targetFrequency;
+    hitCount = 0;
+    missCount = 0;
     state = SONG_LOADED;
-    noteJustHit = false;
-    
-    Serial.print("[SONG] Restarted song: ");
-    Serial.println(currentSongFilename);
-    Serial.print("[SONG] First note: MIDI ");
-    Serial.print(currentTargetNote);
-    Serial.print(" (");
-    Serial.print(currentTargetFreq, 1);
-    Serial.println(" Hz)");
-}
-
-void SongManager::newSongReceived(const char* filename) {
-    state = SONG_NEW_RECEIVED;
-    Serial.print("[SONG] New song received: ");
-    Serial.println(filename);
-    
-    // Automatically load the new song
-    if (!loadSong(filename)) {
-        Serial.println("[SONG] Failed to load new song");
-        state = SONG_IDLE;
-    } else {
-        Serial.println("[SONG] New song loaded and ready to play!");
-    }
+    leds->clearAll();
 }
 
 void SongManager::unloadSong() {
-    noteSequence.clear();
-    currentNoteIndex = 0;
-    currentTargetFreq = 440.0;
-    currentTargetNote = 69;
+    parser.clear();
     state = SONG_IDLE;
-    noteJustHit = false;
     currentSongFilename = "";
-    
-    Serial.println("[SONG] Song unloaded");
+    leds->clearAll();
 }

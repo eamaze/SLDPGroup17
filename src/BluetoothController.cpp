@@ -143,26 +143,34 @@ void BluetoothController::sendData(const String& data) {
     }
 }
 
-void BluetoothController::sendPitchData(float pitch, float targetFreq, bool isHit) {
-    // Example format: PITCH:440.5|TARGET:440.0|HIT:1
-    String payload = "PITCH:" + String(pitch, 2) + 
-                     "|TARGET:" + String(targetFreq, 2) + 
-                     "|HIT:" + (isHit ? "1" : "0");
+void BluetoothController::sendSongCompleted() {
+    String payload = "SONG_COMPLETED";
     sendData(payload);
 }
 
 
 // --- Incoming Data & Command Parsing ---
 void BluetoothController::processReceivedData(uint8_t* data, size_t length) {
-    if (ftState == FT_RECEIVING) {
+    // Convert incoming packet to a string to check for interrupt commands
+    String textPayload = "";
+    for (size_t i = 0; i < length; i++) {
+        textPayload += (char)data[i];
+    }
+
+    // Always allow the user to CANCEL, even if we are in the middle of a file
+    if (textPayload == "CANCEL") {
+        handleFileTransferCommand(textPayload);
+        return;
+    }
+
+    // If we are receiving a file AND we haven't hit the target size yet, it's file data
+    if (ftState == FT_RECEIVING && bytesReceived < expectedFileSize) {
         receiveFileData(data, length);
-    } else {
-        // If not receiving a file, treat incoming payload as a text command
-        String command = "";
-        for (size_t i = 0; i < length; i++) {
-            command += (char)data[i];
-        }
-        handleFileTransferCommand(command);
+    } 
+    else {
+        // Otherwise, treat the incoming packet as a command 
+        // (This catches the END command once bytesReceived >= expectedFileSize)
+        handleFileTransferCommand(textPayload);
     }
 }
 

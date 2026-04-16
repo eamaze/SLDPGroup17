@@ -2,94 +2,57 @@
 #define SONG_MANAGER_H
 
 #include "MidiParser.h"
+#include "LedController.h"
 #include <Arduino.h>
 
 enum SongState {
-    SONG_IDLE,           // No song loaded
-    SONG_LOADED,         // Song loaded, waiting for first note
-    SONG_PLAYING,        // In the middle of playing
-    SONG_FINISHED,       // Song completed
-    SONG_NEW_RECEIVED    // New song received - needs restart
+    SONG_IDLE,           
+    SONG_LOADED,         // Loaded, waiting for BT "START" command
+    SONG_PLAYING,        // Playhead is active
+    SONG_FINISHED        
 };
 
 class SongManager {
 private:
     MidiParser parser;
-    std::vector<NoteEvent> noteSequence;
-    
-    uint16_t currentNoteIndex;  // Current position in the song
-    float currentTargetFreq;    // Current target frequency
-    uint8_t currentTargetNote;  // Current MIDI note number
+    LedController* leds; // Reference to LED controller
     
     SongState state;
     String currentSongFilename;
     
-    unsigned long noteHitTime;  // When the note was successfully hit
-    bool noteJustHit;           // Flag to indicate note was just detected
+    unsigned long startTime;
+    uint32_t leniencyWindow;      // +/- ms window for a hit
+    uint32_t audioLatencyOffset;  // fixed ms offset for processing delay
+    float frequencyTolerance;
     
-    const unsigned long CONFIRMATION_DURATION = 500;  // LED flash duration in ms
+    // Accuracy tracking
+    uint16_t hitCount;
+    uint16_t missCount;
     
 public:
-    SongManager();
+    SongManager(LedController* ledController);
     
-    // Load a song from SPIFFS
-    bool loadSong(const char* filename);
+    // Configuration setters
+    void setLeniencyWindow(uint32_t ms) { leniencyWindow = ms; }
+    void setAudioLatencyOffset(uint32_t ms) { audioLatencyOffset = ms; }
+    void setFrequencyTolerance(float hz) { frequencyTolerance = hz; }
     
-    // Get the current target frequency
-    float getCurrentTargetFrequency() const {
-        return currentTargetFreq;
-    }
+    // Load file with provided BPM
+    bool loadSong(const char* filename, uint16_t bpm);
     
-    // Get the current target MIDI note
-    uint8_t getCurrentTargetNote() const {
-        return currentTargetNote;
-    }
+    // Start playhead
+    void startPlaying();
     
-    // Get the current note index
-    uint16_t getCurrentNoteIndex() const {
-        return currentNoteIndex;
-    }
+    // Main continuous playhead logic. Pass the current detected pitch (or -1.0 if none)
+    void updatePlayhead(float currentPitch);
     
-    // Check if we're on the last note
-    bool isLastNote() const {
-        return currentNoteIndex >= noteSequence.size() - 1;
-    }
+    float getAccuracy() const;
+    SongState getState() const { return state; }
+    bool isSongLoaded() const { return state != SONG_IDLE; }
+    uint16_t getTotalNotes() const { return parser.getNoteCount(); }
     
-    // Mark that the current note was hit and move to next
-    // Returns true if there are more notes, false if song is finished
-    bool noteHit();
-    
-    // Check if the confirmation LED should still be on
-    bool shouldShowConfirmation() const;
-    
-    // Get the current state
-    SongState getState() const {
-        return state;
-    }
-    
-    // Restart the current song from the beginning
-    void restartSong();
-    
-    // Signal that a new song was received over Bluetooth
-    void newSongReceived(const char* filename);
-    
-    // Get the total number of notes in the song
-    uint16_t getTotalNotes() const {
-        return noteSequence.size();
-    }
-    
-    // Get the current song filename
-    String getCurrentSongName() const {
-        return currentSongFilename;
-    }
-    
-    // Unload current song
+    void resetSong();
     void unloadSong();
-    
-    // Check if song is loaded
-    bool isSongLoaded() const {
-        return noteSequence.size() > 0;
-    }
 };
 
 #endif

@@ -64,7 +64,7 @@ public:
     bool isConnectedToBT();
     
     void sendData(const String& data);
-    void sendPitchData(float pitch, float targetFreq, bool isHit);
+    void sendSongCompleted();
     
     void handleIncomingData();
     

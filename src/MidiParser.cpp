@@ -3,7 +3,7 @@
 MidiParser::MidiParser() : fileSize(0) {
 }
 
-bool MidiParser::parseMidiFile(const char* filename) {
+bool MidiParser::parseMidiFile(const char* filename, uint16_t bpm) {
     clear();
     
     File midiFile = SPIFFS.open(filename, "r");
@@ -52,9 +52,9 @@ bool MidiParser::parseMidiFile(const char* filename) {
     Serial.print(", Division (ticks/beat): ");
     Serial.println(division);
     
-    // Assume 120 BPM for timing calculations (rough estimate)
-    // 120 BPM = 2 beats per second = 500ms per beat
-    // Actual tempo could be different, but this is acceptable for a UI
+    // Calculate ms per beat dynamically based on provided BPM
+    // 60,000 ms per minute / BPM = ms per beat
+    uint32_t msPerBeat = 60000UL / bpm; 
     
     // Parse each track
     uint32_t currentTime = 0;  // In milliseconds
@@ -87,9 +87,8 @@ bool MidiParser::parseMidiFile(const char* filename) {
             uint32_t deltaTime = readVariableLength(midiFile);
             trackTime += deltaTime;
             
-            // Calculate absolute time in milliseconds (very rough approximation)
-            // Assuming 500ms per beat (120 BPM) and division ticks per beat
-            uint32_t timeMs = (uint32_t)((trackTime * 500UL) / (uint32_t)division);
+            // New absolute time calculation using dynamic BPM
+            uint32_t timeMs = (uint32_t)((trackTime * msPerBeat) / (uint32_t)division);
             
             uint8_t status = readByte(midiFile);
             
@@ -115,12 +114,13 @@ bool MidiParser::parseMidiFile(const char* filename) {
                     Serial.print(timeMs);
                     Serial.println(" ms");
                     
-                    // Add to note sequence (we'll consolidate simultaneous notes later)
-                    // For now, just track the note
+                    // Note event structured for playhead tracking
                     NoteEvent event;
                     event.highestNote = noteNumber;
                     event.targetFrequency = MidiNote{noteNumber, (uint16_t)timeMs}.getFrequency();
                     event.timeMs = timeMs;
+                    event.evaluated = false;
+                    event.hit = false;
                     noteSequence.push_back(event);
                 }
             } else if (eventType == 0x80) {  // Note Off
@@ -191,11 +191,13 @@ bool MidiParser::parseMidiFile(const char* filename) {
             }
         }
         
-        // Add consolidated event with highest note
+        // Add consolidated event with highest note and tracking statuses
         NoteEvent event;
         event.highestNote = highestNote;
         event.targetFrequency = MidiNote{highestNote, (uint16_t)currentTime}.getFrequency();
         event.timeMs = currentTime;
+        event.evaluated = false;
+        event.hit = false;
         consolidated.push_back(event);
     }
     
