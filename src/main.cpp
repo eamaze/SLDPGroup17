@@ -33,8 +33,6 @@ BluetoothController btController("ESP32_MusicalNote");
 LedController ledController(WHITE_LEDS, RED_LEDS);
 SongManager songManager(&ledController);
 
-uint16_t currentBPM = 120; // Default until BT updates it
-
 void i2s_install() {
   const i2s_config_t i2s_config = {
       .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
@@ -56,31 +54,6 @@ void i2s_setpin() {
       .data_out_num = I2S_PIN_NO_CHANGE,
       .data_in_num = I2S_SD};
   i2s_set_pin(I2S_PORT, &pin_config);
-}
-
-// Function to handle custom text commands from the BT Client
-void processBluetoothCommands() {
-  // *ASSUMING* btController has a way to get the latest message text. 
-  // If your Bluetooth class uses a callback, move this logic there.
-  String data = btController.checkNewFileTransfer(); // Hacky check for demo. You'll need to fetch standard Rx text strings.
-  
-  if (data.startsWith("BPM:")) {
-    currentBPM = data.substring(4).toInt();
-    if (currentBPM == 0) currentBPM = 120;
-    Serial.printf("[BT] Received new BPM: %d\n", currentBPM);
-  }
-  else if (data == "START" && songManager.getState() == SONG_LOADED) {
-    songManager.startPlaying();
-    btController.sendData("Playback Started!");
-  }
-  
-  // Checking for standard File Transfers
-  String newFile = btController.checkNewFileTransfer();
-  if (newFile.length() > 0) {
-    Serial.println("\n*** NEW SONG RECEIVED ***");
-    songManager.loadSong(newFile.c_str(), currentBPM);
-    btController.sendData("Loaded! Awaiting START command.");
-  }
 }
 
 void setup() {
@@ -107,9 +80,30 @@ void setup() {
 
 void loop() {
   btController.handleIncomingData();
-  processBluetoothCommands();
   ledController.update(); // Maintain red LED pulse timers
 
+  // --- Process Bluetooth Commands ---
+  // 1. Check if the "START" command was triggered via Bluetooth
+  if (btController.checkStartCommand() && songManager.getState() == SONG_LOADED) {
+    songManager.startPlaying();
+    btController.sendData("Playback Started!");
+  }
+
+  // 2. Check if a new MIDI file just finished transferring
+  String newFile = btController.checkNewFileTransfer();
+  if (newFile.length() > 0) {
+    Serial.println("\n*** NEW SONG RECEIVED ***");
+    
+    // Grab the latest BPM from the Bluetooth controller
+    uint16_t currentBpm = btController.getBPM();
+    
+    // Load the newly received file with the provided BPM
+    songManager.loadSong(newFile.c_str(), currentBpm);
+    btController.sendData("Loaded! Awaiting START command.");
+  }
+
+
+  // --- Process Audio and Playhead ---
   float detectedPitch = -1.0;
   
   // Only process audio if we are actively playing
@@ -140,6 +134,8 @@ void loop() {
     songManager.updatePlayhead(detectedPitch);
   }
   
+  
+  // --- Handle Song Completion ---
   // Check if song just finished
   if (songManager.getState() == SONG_FINISHED) {
     float accuracy = songManager.getAccuracy();

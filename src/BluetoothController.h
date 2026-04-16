@@ -50,6 +50,10 @@ private:
     bool newFileTransferFlag;  // Flag when file transfer completes
     String lastTransferredFilename;
     
+    // Playback state management
+    uint16_t currentBPM;
+    bool startCommandFlag;
+    
     // Private helper methods
     void initSPIFFS();
     bool validateMIDFile(const char* filename);
@@ -84,13 +88,13 @@ public:
     String getLastMIDFile();
     bool fileSizeAvailable(uint32_t requiredSize);
     
-    // Check if a new file was just transferred (and clear the flag)
+    // State checkers for main loop
     String checkNewFileTransfer();
-    
-    // Check current file transfer state
     FileTransferState getFileTransferState() const;
-    
-    // Get the last successfully transferred file
     String getLastTransferredFile() const;
+    
+    // Playback state accessors
+    uint16_t getBPM() const;
+    bool checkStartCommand();
 };
 #endif
