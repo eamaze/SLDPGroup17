@@ -1,47 +1,156 @@
 #include "LedController.h"
+#include <math.h> // Needed for sine wave gradient
 
-LedController::LedController(const uint8_t wPins[12], const uint8_t rPins[12]) {
+LedController::LedController(Adafruit_TLC5947* tlcController) {
+    tlc = tlcController;
     for (int i = 0; i < 12; i++) {
-        whitePins[i] = wPins[i];
-        redPins[i] = rPins[i];
         missTimers[i] = 0;
+        incorrectTimers[i] = 0;
     }
+    currentMode = MODE_IDLE_GRADIENT; // Start in idle mode
+    effectTimer = 0;
+    effectStep = 0;
+    flashCount = 0;
 }
 
 void LedController::begin() {
-    for (int i = 0; i < 12; i++) {
-        pinMode(whitePins[i], OUTPUT);
-        pinMode(redPins[i], OUTPUT);
-        digitalWrite(whitePins[i], LOW);
-        digitalWrite(redPins[i], LOW);
-    }
+    clearAll();
+}
+
+void LedController::setLedState(uint8_t channel, bool state) {
+    // 0 = ON (Full), 4095 = OFF
+    tlc->setPWM(channel, state ? 0 : 4095);
+}
+
+void LedController::setLedPWM(uint8_t channel, uint16_t brightness) {
+    // brightness: 0 (Off) to 4095 (Max brightness)
+    // Invert for JZ-MOS + Pull-up logic
+    uint16_t pwmValue = 4095 - constrain(brightness, 0, 4095);
+    tlc->setPWM(channel, pwmValue);
+}
+
+void LedController::setEffectMode(LedEffectMode newMode) {
+    if (currentMode == newMode) return;
+    
+    currentMode = newMode;
+    effectTimer = millis();
+    effectStep = 0;
+    flashCount = 0;
+    clearAll(); // Reset lights on state change
 }
 
 void LedController::setTargetNote(uint8_t midiNote, bool state) {
-    uint8_t index = midiNote % 12; // Map 128 MIDI notes to 12 semitone LEDs
-    digitalWrite(whitePins[index], state ? HIGH : LOW);
+    if (currentMode != MODE_NORMAL) return; // Only process notes in normal mode
+    uint8_t index = midiNote % 12; 
+    setLedState(GREEN_OFFSET + index, state);
+    tlc->write();
 }
 
 void LedController::triggerMiss(uint8_t midiNote) {
+    if (currentMode != MODE_NORMAL) return;
     uint8_t index = midiNote % 12;
-    digitalWrite(redPins[index], HIGH);
-    missTimers[index] = millis(); // Start the pulse timer
+    setLedState(BLUE_OFFSET + index, true);
+    missTimers[index] = millis();
+    tlc->write();
+}
+
+void LedController::triggerIncorrect(uint8_t midiNote) {
+    if (currentMode != MODE_NORMAL) return;
+    uint8_t index = midiNote % 12;
+    setLedState(RED_OFFSET + index, true);
+    incorrectTimers[index] = millis();
+    tlc->write();
+}
+
+void LedController::handleEffects() {
+    unsigned long currentMillis = millis();
+
+    switch (currentMode) {
+        case MODE_IDLE_GRADIENT: {
+            // Creates a moving wave across all 36 channels
+            for (int i = 0; i < 36; i++) {
+                // Calculate sine wave: time factor + offset for each LED
+                float wave = sin((currentMillis / 300.0) + (i * 0.3)); 
+                uint16_t brightness = (wave + 1.0) * 2047.5; // Map -1/1 to 0-4095
+                setLedPWM(i, brightness);
+            }
+            tlc->write();
+            break;
+        }
+
+        case MODE_LOAD_FLASH: {
+            // Flash all lights ON for 500ms, then OFF, then switch to NORMAL
+            if (currentMillis - effectTimer < 500) {
+                if (effectStep == 0) {
+                    for (int i=0; i<36; i++) setLedState(i, true);
+                    tlc->write();
+                    effectStep = 1;
+                }
+            } else {
+                clearAll();
+                setEffectMode(MODE_NORMAL); // Transition to gameplay mode
+            }
+            break;
+        }
+
+        case MODE_END_FLASH: {
+            // Flash Green LEDs 3 times (ON for 300ms, OFF for 300ms)
+            unsigned long elapsed = currentMillis - effectTimer;
+            if (flashCount < 3) {
+                bool isOn = (elapsed % 600) < 300;
+                
+                // Only update if state changes
+                if ((isOn && effectStep == 0) || (!isOn && effectStep == 1)) {
+                    for (int i=0; i<12; i++) setLedState(GREEN_OFFSET + i, isOn);
+                    tlc->write();
+                    effectStep = isOn ? 1 : 0;
+                    
+                    if (!isOn && effectStep == 0) flashCount++; // Count completed flash
+                }
+            } else {
+                clearAll();
+                setEffectMode(MODE_IDLE_GRADIENT); // Go back to idle
+            }
+            break;
+        }
+
+        case MODE_NORMAL:
+            // Standard game logic (handled in update())
+            break;
+    }
 }
 
 void LedController::update() {
     unsigned long currentMillis = millis();
+    bool needsUpdate = false;
+
+    if (currentMode != MODE_NORMAL) {
+        handleEffects();
+        return; // Skip normal miss/incorrect timers if animating
+    }
+
+    // Normal Gameplay Timer Checks
     for (int i = 0; i < 12; i++) {
         if (missTimers[i] > 0 && (currentMillis - missTimers[i] >= PULSE_DURATION)) {
-            digitalWrite(redPins[i], LOW); // Turn off red LED
-            missTimers[i] = 0;             // Reset timer
+            setLedState(BLUE_OFFSET + i, false);
+            missTimers[i] = 0;
+            needsUpdate = true;
         }
+        if (incorrectTimers[i] > 0 && (currentMillis - incorrectTimers[i] >= PULSE_DURATION)) {
+            setLedState(RED_OFFSET + i, false);
+            incorrectTimers[i] = 0;
+            needsUpdate = true;
+        }
+    }
+
+    if (needsUpdate) {
+        tlc->write();
     }
 }
 
 void LedController::clearAll() {
-    for (int i = 0; i < 12; i++) {
-        digitalWrite(whitePins[i], LOW);
-        digitalWrite(redPins[i], LOW);
-        missTimers[i] = 0;
+    for (int i = 0; i < 36; i++) {
+        setLedState(i, false);
     }
+    tlc->write();
 }

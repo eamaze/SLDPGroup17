@@ -10,17 +10,22 @@ bool SongManager::loadSong(const char* filename, uint16_t bpm) {
     if (!parser.parseMidiFile(filename, bpm)) {
         Serial.println("[SONG] Failed to parse MIDI file.");
         state = SONG_IDLE;
+        leds->setEffectMode(MODE_IDLE_GRADIENT); // Revert to gradient on failure
         return false;
     }
     
     if (parser.getNoteCount() == 0) {
         Serial.println("[SONG] No notes found in MIDI file");
         state = SONG_IDLE;
+        leds->setEffectMode(MODE_IDLE_GRADIENT);
         return false;
     }
     
     currentSongFilename = String(filename);
     resetSong(); // Resets counters and states
+    
+    // --> Trigger the Load Flash animation! <--
+    leds->setEffectMode(MODE_LOAD_FLASH); 
     
     Serial.printf("[SONG] Loaded %s with %d notes at %d BPM\n", filename, parser.getNoteCount(), bpm);
     return true;
@@ -30,6 +35,7 @@ void SongManager::startPlaying() {
     if (state == SONG_LOADED) {
         state = SONG_PLAYING;
         startTime = millis();
+        leds->setEffectMode(MODE_NORMAL); // Ensure LEDs are ready for gameplay
         Serial.println("[SONG] Playhead STARTED!");
     }
 }
@@ -49,14 +55,13 @@ void SongManager::updatePlayhead(float currentPitch) {
         allEvaluated = false; // We found a note that still needs processing
         long timeDiff = currentPlayTime - (long)note.timeMs;
         
-        // 1. Target Window Approaching: Turn on White LED slightly early so user can prepare
+        // 1. Target Window Approaching: Turn on Green LED slightly early
         if (timeDiff >= -500 && timeDiff < -leniencyWindow) {
             leds->setTargetNote(note.highestNote, true);
         }
         
         // 2. Active Leniency Window (Hit Box)
         if (abs(timeDiff) <= leniencyWindow) {
-            // Ensure white LED is on
             leds->setTargetNote(note.highestNote, true);
             
             // Check for hit
@@ -66,7 +71,7 @@ void SongManager::updatePlayhead(float currentPitch) {
                 hitCount++;
                 
                 Serial.printf("[HIT] Note %d / Freq %.1f\n", note.highestNote, note.targetFrequency);
-                leds->setTargetNote(note.highestNote, false); // Turn off white LED on hit
+                leds->setTargetNote(note.highestNote, false); // Turn off Green LED on hit
             }
         }
         
@@ -76,18 +81,21 @@ void SongManager::updatePlayhead(float currentPitch) {
             missCount++;
             
             Serial.printf("[MISS] Note %d\n", note.highestNote);
-            leds->setTargetNote(note.highestNote, false); // Turn off white LED
-            leds->triggerMiss(note.highestNote);          // Pulse red LED
+            leds->setTargetNote(note.highestNote, false); // Turn off Green LED
+            leds->triggerMiss(note.highestNote);          // Pulse Blue LED
         }
         
-        // Minor optimization: Notes are chronological. If a note is way in the future, stop checking.
+        // Optimization: Notes are chronological.
         if (timeDiff < -500) break; 
     }
     
     // Check for song end
     if (allEvaluated) {
         state = SONG_FINISHED;
-        leds->clearAll();
+        
+        // --> Trigger the 3x Green Flash animation! <--
+        leds->setEffectMode(MODE_END_FLASH); 
+        
         Serial.printf("[SONG] COMPLETED! Accuracy: %.1f%%\n", getAccuracy());
     }
 }
@@ -107,12 +115,12 @@ void SongManager::resetSong() {
     hitCount = 0;
     missCount = 0;
     state = SONG_LOADED;
-    leds->clearAll();
+    // (Notice we removed leds->clearAll() here so the End Flash animation isn't interrupted!)
 }
 
 void SongManager::unloadSong() {
     parser.clear();
     state = SONG_IDLE;
     currentSongFilename = "";
-    leds->clearAll();
+    leds->setEffectMode(MODE_IDLE_GRADIENT); // Back to the idle gradient
 }

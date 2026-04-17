@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <driver/i2s.h>
+#include <Adafruit_TLC5947.h>
 #include "Yin.h"
 #include "BluetoothController.h"
 #include "LedController.h"
@@ -12,11 +13,13 @@
 #define I2S_SD 32
 #define I2S_PORT I2S_NUM_0
 
-// --- HARDWARE MAPPING SETTINGS ---
-// Note: Some of these pins might conflict or be input only depending on your exact board.
-// Replace with the physical output pins connected to your LEDs or Shift Registers.
-const uint8_t WHITE_LEDS[12] = {2, 4, 5, 12, 13, 14, 15, 18, 19, 21, 22, 23}; 
-const uint8_t RED_LEDS[12]   = {26, 27, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}; // Fill in remaining pins!
+// --- TLC5947 HARDWARE SETTINGS ---
+#define NUM_TLC 2      // 2 boards chained together (48 channels total)
+#define DATA_PIN 23    // MOSI
+#define CLOCK_PIN 18   // SCK
+#define LATCH_PIN 5    // Latch
+
+Adafruit_TLC5947 tlc = Adafruit_TLC5947(NUM_TLC, CLOCK_PIN, DATA_PIN, LATCH_PIN);
 
 // --- PITCH RECOGNITION SETTINGS ---
 const uint16_t SAMPLES = 1024;
@@ -30,7 +33,7 @@ Yin yin;
 
 // Controllers and managers
 BluetoothController btController("ESP32_MusicalNote");
-LedController ledController(WHITE_LEDS, RED_LEDS);
+LedController ledController(&tlc);
 SongManager songManager(&ledController);
 
 void i2s_install() {
@@ -60,11 +63,11 @@ void setup() {
   Serial.begin(115200);
   delay(2000);  
 
-  ledController.begin();
+  tlc.begin();
+  ledController.begin(); // Will start the IDLE_GRADIENT automatically
   
-  // Set our new configurable timing tolerances
-  songManager.setLeniencyWindow(150);      // +/- 150ms hit box
-  songManager.setAudioLatencyOffset(80);   // Account for Yin calculation time
+  songManager.setLeniencyWindow(150);      
+  songManager.setAudioLatencyOffset(80);   
   songManager.setFrequencyTolerance(FREQUENCY_TOLERANCE);
 
   btController.begin();
@@ -80,36 +83,30 @@ void setup() {
 
 void loop() {
   btController.handleIncomingData();
-  ledController.update(); // Maintain red LED pulse timers
+  
+  // Handles gradients, flashes, and standard hit/miss pulse timers
+  ledController.update(); 
 
   // --- Process Bluetooth Commands ---
-  // 1. Check if the "START" command was triggered via Bluetooth
   if (btController.checkStartCommand() && songManager.getState() == SONG_LOADED) {
     songManager.startPlaying();
     btController.sendData("Playback Started!");
   }
 
-  // 2. Check if a new MIDI file just finished transferring
   String newFile = btController.checkNewFileTransfer();
   if (newFile.length() > 0) {
     Serial.println("\n*** NEW SONG RECEIVED ***");
-    
-    // Grab the latest BPM from the Bluetooth controller
     uint16_t currentBpm = btController.getBPM();
-    
-    // Load the newly received file with the provided BPM
     songManager.loadSong(newFile.c_str(), currentBpm);
     btController.sendData("Loaded! Awaiting START command.");
   }
 
-
   // --- Process Audio and Playhead ---
   float detectedPitch = -1.0;
   
-  // Only process audio if we are actively playing
   if (songManager.getState() == SONG_PLAYING) {
     size_t bytesIn = 0;
-    esp_err_t result = i2s_read(I2S_PORT, &raw_samples, sizeof(raw_samples), &bytesIn, 0); // Non-blocking read
+    esp_err_t result = i2s_read(I2S_PORT, &raw_samples, sizeof(raw_samples), &bytesIn, 0);
 
     if (result == ESP_OK && bytesIn > 0) {
       int samples_read = bytesIn / 4;
@@ -130,20 +127,16 @@ void loop() {
       }
     }
     
-    // Update playhead with the pitch (or -1.0 if silent)
     songManager.updatePlayhead(detectedPitch);
   }
   
-  
   // --- Handle Song Completion ---
-  // Check if song just finished
   if (songManager.getState() == SONG_FINISHED) {
     float accuracy = songManager.getAccuracy();
     String accMsg = "Song Complete! Accuracy: " + String(accuracy, 1) + "%";
     btController.sendData(accMsg);
     btController.sendSongCompleted();
     
-    // Reset to idle/loaded to await restart
-    songManager.resetSong();
+    songManager.resetSong(); 
   }
 }

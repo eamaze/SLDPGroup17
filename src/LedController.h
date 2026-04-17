@@ -2,31 +2,57 @@
 #define LED_CONTROLLER_H
 
 #include <Arduino.h>
+#include <Adafruit_TLC5947.h>
+
+enum LedEffectMode {
+    MODE_NORMAL,         // Playing song, standard hit/miss triggers
+    MODE_IDLE_GRADIENT,  // No song loaded, sweeping gradient
+    MODE_LOAD_FLASH,     // Song just loaded, flash all lights
+    MODE_END_FLASH       // Song finished, flash green lights 3 times
+};
 
 class LedController {
 private:
-    uint8_t whitePins[12];
-    uint8_t redPins[12];
+    Adafruit_TLC5947* tlc;
     
     unsigned long missTimers[12];
-    const unsigned long PULSE_DURATION = 300; // Miss pulse duration in ms
+    unsigned long incorrectTimers[12];
+    const unsigned long PULSE_DURATION = 300; // Pulse duration in ms
+
+    // Animation tracking variables
+    LedEffectMode currentMode;
+    unsigned long effectTimer;
+    int effectStep;
+    int flashCount;
+
+    // Channel offsets
+    const uint8_t GREEN_OFFSET = 0;   // Channels 0-11
+    const uint8_t RED_OFFSET = 12;    // Channels 12-23
+    const uint8_t BLUE_OFFSET = 24;   // Channels 24-35
+
+    // Helper for simple ON/OFF with inverted logic
+    void setLedState(uint8_t channel, bool state);
+    
+    // Helper for fading/gradients with inverted logic (0-4095)
+    void setLedPWM(uint8_t channel, uint16_t brightness);
+
+    // Internal handler called by update()
+    void handleEffects();
 
 public:
-    // Pass arrays containing the GPIO pins for the 12 white and 12 red LEDs
-    LedController(const uint8_t wPins[12], const uint8_t rPins[12]);
+    LedController(Adafruit_TLC5947* tlcController);
     
     void begin();
     
-    // Turns the white LED on or off for the specific note target
+    // Target note controls
     void setTargetNote(uint8_t midiNote, bool state);
-    
-    // Triggers the red LED to pulse for a missed note
     void triggerMiss(uint8_t midiNote);
+    void triggerIncorrect(uint8_t midiNote);
     
-    // Must be called in loop() to handle non-blocking red LED pulses
+    // Change the current animation state
+    void setEffectMode(LedEffectMode newMode);
+
     void update();
-    
-    // Turns off all LEDs immediately
     void clearAll();
 };
 
