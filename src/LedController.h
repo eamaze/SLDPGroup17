@@ -5,10 +5,11 @@
 #include <Adafruit_TLC5947.h>
 
 enum LedEffectMode {
-    MODE_NORMAL,         // Playing song, standard hit/miss triggers
-    MODE_IDLE_GRADIENT,  // No song loaded, sweeping gradient
-    MODE_LOAD_FLASH,     // Song just loaded, flash all lights
-    MODE_END_FLASH       // Song finished, flash green lights 3 times
+    MODE_NORMAL,         
+    MODE_IDLE_GRADIENT,  
+    MODE_LOAD_FLASH,     
+    MODE_END_FLASH,
+    MODE_TEST_ROWS       // <-- ADD THIS NEW MODE
 };
 
 class LedController {

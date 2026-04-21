@@ -64,8 +64,9 @@ void setup() {
   delay(2000);  
 
   tlc.begin();
-  ledController.begin(); // Will start the IDLE_GRADIENT automatically
-  
+  ledController.begin(); // Will start the IDLE_GRADIENT automatically 
+  ledController.setEffectMode(MODE_TEST_ROWS);
+   
   songManager.setLeniencyWindow(150);      
   songManager.setAudioLatencyOffset(80);   
   songManager.setFrequencyTolerance(FREQUENCY_TOLERANCE);
