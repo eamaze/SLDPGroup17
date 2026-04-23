@@ -19,7 +19,7 @@ struct SongDetailView: View {
                 header
                 infoCards
                 activityPanel
-                startButton
+                controlButtons
             }
             .padding()
         }
@@ -131,56 +131,67 @@ struct SongDetailView: View {
         )
     }
 
-    private var startButton: some View {
-        Button(action: startSongFlow) {
-            HStack(spacing: 10) {
-                Image(systemName: "play.fill")
-                    .font(.system(size: 16, weight: .bold))
-                Text(isSending ? "Sending…" : "Start")
-                    .font(.system(size: 17, weight: .bold))
+    private var controlButtons: some View {
+        HStack(spacing: 12) {
+            Button(action: sendFileOnly) {
+                HStack(spacing: 8) {
+                    Image(systemName: "paperplane")
+                        .font(.system(size: 16, weight: .bold))
+                    Text(isSending ? "Sending…" : "Send File")
+                        .font(.system(size: 17, weight: .bold))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 14)
+            .buttonStyle(.borderedProminent)
+            .disabled(!ble.isConnected || isSending)
+
+            Button(action: playSong) {
+                HStack(spacing: 8) {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 16, weight: .bold))
+                    Text("Play")
+                        .font(.system(size: 17, weight: .bold))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+            }
+            .buttonStyle(.bordered)
+            .disabled(!ble.isConnected)
         }
-        .buttonStyle(.borderedProminent)
-        .disabled(!ble.isConnected || isSending)
     }
 
-    private func startSongFlow() {
+    private func sendFileOnly() {
         lastStatus = nil
-
         guard ble.isConnected else {
             lastStatus = "Not connected to BLE device."
             return
         }
-
         let filename = song.midiFilename
-
         guard let url = Bundle.main.url(forResource: song.name, withExtension: "mid") else {
             lastStatus = "Missing bundled file: \(filename)"
             return
         }
-
         do {
             isSending = true
             let data = try Data(contentsOf: url)
-
-            // Send BPM and file immediately
             ble.sendCommandLine("BPM:\(song.tempoBPM)")
             ble.sendFile(filename: filename, data: data)
-
-            lastStatus = "Sent \(filename) + BPM. Will send START in 4s…"
-
-            // Delay the START command by 4 seconds to ensure device is ready
-            DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-                ble.sendCommandLine("BEGINSONG")
-                lastStatus = "BEGINSONG sent. Waiting for completion…"
-                isSending = false
-            }
+            lastStatus = "Sent \(filename) + BPM. File transfer in progress…"
+            isSending = false
         } catch {
             lastStatus = "Failed to read file: \(error.localizedDescription)"
             isSending = false
         }
+    }
+
+    private func playSong() {
+        guard ble.isConnected else {
+            lastStatus = "Not connected to BLE device."
+            return
+        }
+        ble.sendCommandLine("BEGINSONG")
+        lastStatus = "BEGINSONG sent. Waiting for completion…"
     }
 
     private func handleIncomingLine(_ line: String) {
