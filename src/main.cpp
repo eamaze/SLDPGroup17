@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <driver/i2s.h>
-#include <Adafruit_TLC5947.h>
 #include "Yin.h"
 #include "BluetoothController.h"
 #include "LedController.h"
@@ -13,13 +12,12 @@
 #define I2S_SD 32
 #define I2S_PORT I2S_NUM_0
 
-// --- TLC5947 HARDWARE SETTINGS ---
-#define NUM_TLC 2      // 2 boards chained together (48 channels total)
-#define DATA_PIN 23    // MOSI
-#define CLOCK_PIN 18   // SCK
-#define LATCH_PIN 5    // Latch
-
-Adafruit_TLC5947 tlc = Adafruit_TLC5947(NUM_TLC, CLOCK_PIN, DATA_PIN, LATCH_PIN);
+// --- GPIO MAPPING ---
+// 12 Target Notes
+const uint8_t TARGET_LEDS[12] = {2, 4, 5, 12, 13, 14, 15, 18, 19, 21, 22, 23}; 
+// Status LEDs
+const uint8_t CORRECT_LED = 26; 
+const uint8_t MISS_LED    = 27; 
 
 // --- PITCH RECOGNITION SETTINGS ---
 const uint16_t SAMPLES = 1024;
@@ -33,7 +31,7 @@ Yin yin;
 
 // Controllers and managers
 BluetoothController btController("ESP32_MusicalNote");
-LedController ledController(&tlc);
+LedController ledController(TARGET_LEDS, CORRECT_LED, MISS_LED);
 SongManager songManager(&ledController);
 
 void i2s_install() {
@@ -63,10 +61,8 @@ void setup() {
   Serial.begin(115200);
   delay(2000);  
 
-  tlc.begin();
-  ledController.begin(); // Will start the IDLE_GRADIENT automatically 
-  ledController.setEffectMode(MODE_TEST_ROWS);
-   
+  ledController.begin(); 
+  
   songManager.setLeniencyWindow(150);      
   songManager.setAudioLatencyOffset(80);   
   songManager.setFrequencyTolerance(FREQUENCY_TOLERANCE);
@@ -84,8 +80,6 @@ void setup() {
 
 void loop() {
   btController.handleIncomingData();
-  
-  // Handles gradients, flashes, and standard hit/miss pulse timers
   ledController.update(); 
 
   // --- Process Bluetooth Commands ---
