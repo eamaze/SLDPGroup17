@@ -33,6 +33,13 @@ struct SongDetailView: View {
             guard let line = ble.incomingLines.last else { return }
             handleIncomingLine(line)
         }
+        .onChange(of: lastStatus) { _, newValue in
+            if let newValue {
+                print("[SongDetailView] lastStatus changed -> \(newValue)")
+            } else {
+                print("[SongDetailView] lastStatus cleared (nil)")
+            }
+        }
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 NavigationLink("Bluetooth") {
@@ -158,12 +165,18 @@ struct SongDetailView: View {
             isSending = true
             let data = try Data(contentsOf: url)
 
+            // Send BPM and file immediately
             ble.sendCommandLine("BPM:\(song.tempoBPM)")
             ble.sendFile(filename: filename, data: data)
-            ble.sendCommandLine("START")
 
-            lastStatus = "Sent \(filename) + BPM. Waiting for completion…"
-            isSending = false
+            lastStatus = "Sent \(filename) + BPM. Will send START in 4s…"
+
+            // Delay the START command by 4 seconds to ensure device is ready
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                ble.sendCommandLine("BEGINSONG")
+                lastStatus = "BEGINSONG sent. Waiting for completion…"
+                isSending = false
+            }
         } catch {
             lastStatus = "Failed to read file: \(error.localizedDescription)"
             isSending = false
