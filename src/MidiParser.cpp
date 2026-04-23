@@ -1,5 +1,5 @@
 #include "MidiParser.h"
-
+#include <algorithm> // <--- ADD THIS FOR std::sort
 MidiParser::MidiParser() : fileSize(0) {
 }
 
@@ -54,7 +54,10 @@ bool MidiParser::parseMidiFile(const char* filename, uint16_t bpm) {
     
     // Calculate ms per beat dynamically based on provided BPM
     // 60,000 ms per minute / BPM = ms per beat
-    uint32_t msPerBeat = 60000UL / bpm; 
+    // Calculate ms per beat dynamically based on provided BPM
+    // Fallback to prevent divide-by-zero crashes if Bluetooth sends 0
+    uint16_t safeBpm = (bpm > 0) ? bpm : 120; 
+    uint32_t msPerBeat = 60000UL / safeBpm;
     
     // Parse each track
     uint32_t currentTime = 0;  // In milliseconds
@@ -88,8 +91,8 @@ bool MidiParser::parseMidiFile(const char* filename, uint16_t bpm) {
             trackTime += deltaTime;
             
             // New absolute time calculation using dynamic BPM
-            uint32_t timeMs = (uint32_t)((trackTime * msPerBeat) / (uint32_t)division);
-            
+            // Cast to uint64_t prevents 32-bit integer overflow during multiplication
+            uint32_t timeMs = (uint32_t)(((uint64_t)trackTime * msPerBeat) / division);            
             uint8_t status = readByte(midiFile);
             
             // Handle running status (reuse previous status if high bit not set)
@@ -168,19 +171,24 @@ bool MidiParser::parseMidiFile(const char* filename, uint16_t bpm) {
             }
         }
     }
-    
+        
     midiFile.close();
     
     Serial.print("[MIDI] Parsed ");
     Serial.print(noteSequence.size());
     Serial.println(" note events");
     
+    // --- NEW: SORT THE SEQUENCE CHRONOLOGICALLY ---
+    std::sort(noteSequence.begin(), noteSequence.end(), [](const NoteEvent& a, const NoteEvent& b) {
+        return a.timeMs < b.timeMs;
+    });
+
     // Simple post-processing: keep only note on events and consolidate simultaneous notes
     std::vector<NoteEvent> consolidated;
     
     for (size_t i = 0; i < noteSequence.size(); i++) {
         // Find all notes that happen at the same time
-        uint16_t currentTime = noteSequence[i].timeMs;
+        uint32_t currentTime = noteSequence[i].timeMs; // <--- CHANGED TO uint32_t
         uint8_t highestNote = noteSequence[i].highestNote;
         
         // Look ahead for notes at same time
@@ -194,7 +202,7 @@ bool MidiParser::parseMidiFile(const char* filename, uint16_t bpm) {
         // Add consolidated event with highest note and tracking statuses
         NoteEvent event;
         event.highestNote = highestNote;
-        event.targetFrequency = MidiNote{highestNote, (uint16_t)currentTime}.getFrequency();
+        event.targetFrequency = MidiNote{highestNote, currentTime}.getFrequency(); // Match type
         event.timeMs = currentTime;
         event.evaluated = false;
         event.hit = false;

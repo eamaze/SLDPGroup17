@@ -158,7 +158,7 @@ void BluetoothController::processReceivedData(uint8_t* data, size_t length) {
     for (size_t i = 0; i < length; i++) {
         textPayload += (char)data[i];
     }
-
+    textPayload.trim();
     // Always allow the user to CANCEL, even if we are in the middle of a file
     if (textPayload == "CANCEL") {
         handleFileTransferCommand(textPayload);
@@ -224,7 +224,7 @@ void BluetoothController::handleFileTransferCommand(const String& command) {
         Serial.printf("[BT] Received new BPM: %d\n", currentBPM);
     }
     // ADDED: Playback Start Command Parsing
-    else if (command == "START") {
+    else if (command.startsWith("BEGINSONG")) {
         startCommandFlag = true;
         Serial.println("[BT] Received playback START command");
     }
