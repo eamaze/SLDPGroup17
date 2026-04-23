@@ -1,10 +1,3 @@
-//
-//  testApp.swift
-//  test
-//
-//  Created by Kevin L on 4/7/26.
-//
-
 import SwiftUI
 import SwiftData
 
@@ -23,9 +16,16 @@ struct testApp: App {
         }
     }()
 
+    @StateObject private var ble = BLEManager()
+    @StateObject private var session = SessionManager()
+    @StateObject private var profiles = ProfileStore()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            AppRootView()
+                .environmentObject(ble)
+                .environmentObject(session)
+                .environmentObject(profiles)
         }
         .modelContainer(sharedModelContainer)
     }
