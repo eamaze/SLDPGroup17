@@ -4,7 +4,6 @@
 #include "BluetoothController.h"
 #include "LedController.h"
 #include "SongManager.h"
-#include "BT_Diagnostics.h"
 
 // I2S Pins
 #define I2S_WS 25
