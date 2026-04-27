@@ -22,7 +22,7 @@ enum FileTransferState {
 
 /**
  * ESP8266 implementation:
- * - Runs AP mode (SSID/PASS below)
+ * - Runs AP mode
  * - WebSocket server on port 81
  * - Binary frames are treated as file data when FT_RECEIVING
  * - Text frames are treated as commands (START|..., END|..., LIST, CANCEL, BPM:, BEGINSONG)
@@ -74,7 +74,8 @@ public:
 
     bool isConnectedToBT();
 
-    void sendData(const String& data);
+    // NOTE: take String by VALUE to avoid binding issues with temporaries on some cores
+    void sendData(String data);
     void sendSongCompleted();
 
     void handleIncomingData();
