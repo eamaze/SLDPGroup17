@@ -93,6 +93,7 @@ bool MidiParser::parseMidiFile(const char* filename, uint16_t bpm) {
             // New absolute time calculation using dynamic BPM
             // Cast to uint64_t prevents 32-bit integer overflow during multiplication
             uint32_t timeMs = (uint32_t)(((uint64_t)trackTime * msPerBeat) / division);            
+            
             uint8_t status = readByte(midiFile);
             
             // Handle running status (reuse previous status if high bit not set)
@@ -100,7 +101,11 @@ bool MidiParser::parseMidiFile(const char* filename, uint16_t bpm) {
                 midiFile.seek(midiFile.position() - 1);  // Back up
                 status = lastStatus;
             } else {
-                lastStatus = status;
+                // CRITICAL FIX: Only Voice and Mode messages update running status.
+                // System messages (0xF0 to 0xFF) MUST NOT overwrite it.
+                if (status < 0xF0) {
+                    lastStatus = status;
+                }
             }
             
             uint8_t eventType = status & 0xF0;

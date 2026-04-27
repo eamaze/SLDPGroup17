@@ -8,7 +8,7 @@
 
 // I2S Pins
 #define I2S_WS 25
-#define I2S_SCK 33
+#define I2S_SCK 33 
 #define I2S_SD 32
 #define I2S_PORT I2S_NUM_0
 

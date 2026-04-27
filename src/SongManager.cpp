@@ -62,13 +62,15 @@ void SongManager::updatePlayhead(float currentPitch)
 
         allEvaluated = false;
         long timeDiff = currentPlayTime - (long)note.timeMs;
+        long window = (long)leniencyWindow; // <--- ADD THIS EXPLICIT CAST
 
-        if (timeDiff >= -500 && timeDiff < -leniencyWindow)
+        // Use the signed 'window' variable for all comparisons
+        if (timeDiff >= -500 && timeDiff < -window)
         {
             leds->setTargetNote(note.highestNote, true);
         }
 
-        if (abs(timeDiff) <= leniencyWindow)
+        if (abs(timeDiff) <= window)
         {
             leds->setTargetNote(note.highestNote, true);
 
@@ -82,14 +84,14 @@ void SongManager::updatePlayhead(float currentPitch)
                 leds->setTargetNote(note.highestNote, false);
             }
         }
-        else if (timeDiff > leniencyWindow)
+        else if (timeDiff > window)
         {
             note.evaluated = true;
             missCount++;
 
             Serial.printf("[MISS] Note %d\n", note.highestNote);
             leds->setTargetNote(note.highestNote, false);
-            leds->triggerMiss(); // <--- REMOVED THE ARGUMENT
+            leds->triggerMiss(); 
         }
 
         if (timeDiff < -500)
