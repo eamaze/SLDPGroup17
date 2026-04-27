@@ -2,22 +2,15 @@
 #define BLUETOOTH_CONTROLLER_H
 
 #include <Arduino.h>
-#include <SPIFFS.h>
 
-// Include BLE Libraries
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
-#include <BLE2902.h>
+#include <LittleFS.h>
+#include <ESP8266WiFi.h>
+#include <WebSocketsServer.h>
 
-#define MID_FILE_DIR "/midi/"
+// Keep existing path/limits (but stored in LittleFS)
+#define MID_FILE_DIR "/midi"
 #define MAX_FILENAME_LENGTH 32
-#define MAX_FILE_SIZE 524288  // 512KB max file size
-
-// Standard Nordic UART Service UUIDs
-#define SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
-#define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
-#define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+#define MAX_FILE_SIZE 262144  // ESP8266: reduce max to 256KB to avoid FS/memory issues
 
 // File transfer states
 enum FileTransferState {
@@ -27,19 +20,26 @@ enum FileTransferState {
   FT_ERROR
 };
 
+/**
+ * ESP8266 implementation:
+ * - Runs AP mode (SSID/PASS below)
+ * - WebSocket server on port 81
+ * - Binary frames are treated as file data when FT_RECEIVING
+ * - Text frames are treated as commands (START|..., END|..., LIST, CANCEL, BPM:, BEGINSONG)
+ */
 class BluetoothController {
 private:
+    // Kept name for compatibility with existing code
     const char* deviceName;
-    
-    // BLE specific variables
-    BLEServer* pServer;
-    BLECharacteristic* pTxCharacteristic;
+
+    // WiFi AP
+    const char* apSsid;
+    const char* apPassword;
+
+    // WebSocket server
+    WebSocketsServer ws;
     bool deviceConnected;
-    bool oldDeviceConnected;
-    
-    // Buffer for incoming commands
-    String commandQueue;
-    
+
     // File transfer management
     FileTransferState ftState;
     File currentFile;
@@ -47,54 +47,62 @@ private:
     uint32_t bytesReceived;
     uint32_t expectedFileSize;
     uint32_t fileChecksum;
-    bool newFileTransferFlag;  // Flag when file transfer completes
+    bool newFileTransferFlag;
     String lastTransferredFilename;
-    
+
     // Playback state management
     uint16_t currentBPM;
     bool startCommandFlag;
-    
+
     // Private helper methods
-    void initSPIFFS();
+    void initFS();
     bool validateMIDFile(const char* filename);
     uint32_t calculateChecksum(const uint8_t* data, size_t length);
     void handleFileTransferCommand(const String& command);
+    void handleWsEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length);
+
+    // Single-client policy
+    uint8_t activeClient;
 
 public:
     BluetoothController(const char* name = "KEYSTROKE-DEVICE");
-    
+
+    // Configure AP credentials (optional; defaults are provided)
+    void setApCredentials(const char* ssid, const char* password);
+
     void begin();
-    
+
     bool isConnectedToBT();
-    
+
     void sendData(const String& data);
     void sendSongCompleted();
-    
+
     void handleIncomingData();
-    
-    // Callbacks for BLE Server & Characteristics
+
+    // Compatibility no-ops / kept API
     void setConnectionState(bool state);
     void processReceivedData(uint8_t* data, size_t length);
-    
+
     // File transfer methods
     bool startFileTransfer(const String& filename, uint32_t fileSize);
     bool receiveFileData(const uint8_t* buffer, size_t length);
     bool endFileTransfer(uint32_t checksum);
     void cancelFileTransfer();
-    
+
     // File management methods
     void listMIDFiles();
     bool deleteMIDFile(const char* filename);
     String getLastMIDFile();
     bool fileSizeAvailable(uint32_t requiredSize);
-    
+
     // State checkers for main loop
     String checkNewFileTransfer();
     FileTransferState getFileTransferState() const;
     String getLastTransferredFile() const;
-    
+
     // Playback state accessors
     uint16_t getBPM() const;
     bool checkStartCommand();
 };
+
 #endif

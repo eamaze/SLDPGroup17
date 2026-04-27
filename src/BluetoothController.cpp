@@ -1,369 +1,302 @@
 #include "BluetoothController.h"
 
-// --- BLE Callbacks ---
+BluetoothController::BluetoothController(const char* name)
+    : deviceName(name),
+      apSsid("Keystroke-ESP8266"),
+      apPassword("keystroke123"),
+      ws(81),
+      deviceConnected(false),
+      ftState(FT_IDLE),
+      bytesReceived(0),
+      expectedFileSize(0),
+      fileChecksum(0),
+      newFileTransferFlag(false),
+      currentBPM(120),
+      startCommandFlag(false),
+      activeClient(255)
+{
+}
 
-// Callback class for Server connection/disconnection
-class MyServerCallbacks : public BLEServerCallbacks {
-    BluetoothController* controller;
-public:
-    MyServerCallbacks(BluetoothController* pController) : controller(pController) {}
-    
-    void onConnect(BLEServer* pServer) override {
-        controller->setConnectionState(true);
-    };
+void BluetoothController::setApCredentials(const char* ssid, const char* password) {
+    apSsid = ssid;
+    apPassword = password;
+}
 
-    void onDisconnect(BLEServer* pServer) override {
-        controller->setConnectionState(false);
-    }
-};
-
-// Callback class for handling incoming RX data
-class MyCharacteristicCallbacks : public BLECharacteristicCallbacks {
-    BluetoothController* controller;
-public:
-    MyCharacteristicCallbacks(BluetoothController* pController) : controller(pController) {}
-
-    void onWrite(BLECharacteristic* pCharacteristic) override {
-        std::string rxValue = pCharacteristic->getValue();
-        if (rxValue.length() > 0) {
-            controller->processReceivedData((uint8_t*)rxValue.data(), rxValue.length());
+void BluetoothController::initFS() {
+    if (!LittleFS.begin()) {
+        Serial.println("[FS] LittleFS mount failed. Formatting...");
+        LittleFS.format();
+        if (!LittleFS.begin()) {
+            Serial.println("[FS] LittleFS mount failed after format");
         }
     }
-};
 
-
-// --- Constructor ---
-BluetoothController::BluetoothController(const char* name) : 
-    deviceName(name),
-    pServer(nullptr),
-    pTxCharacteristic(nullptr),
-    deviceConnected(false),
-    oldDeviceConnected(false),
-    ftState(FT_IDLE),
-    bytesReceived(0),
-    expectedFileSize(0),
-    fileChecksum(0),
-    newFileTransferFlag(false),
-    currentBPM(120),          // ADDED: Default BPM
-    startCommandFlag(false) { // ADDED: Start flag defaults to false
+    // Ensure midi directory exists (LittleFS uses paths without true dirs, but we can still use prefix)
 }
 
-
-// --- Core BLE & System Initialization ---
 void BluetoothController::begin() {
-    initSPIFFS();
+    initFS();
 
-    // Initialize BLE Device
-    BLEDevice::init(deviceName);
-
-    // Create BLE Server
-    pServer = BLEDevice::createServer();
-    pServer->setCallbacks(new MyServerCallbacks(this));
-
-    // Create BLE Service (Nordic UART)
-    BLEService* pService = pServer->createService(SERVICE_UUID);
-
-    // Create TX Characteristic (ESP32 -> App)
-    pTxCharacteristic = pService->createCharacteristic(
-        CHARACTERISTIC_UUID_TX,
-        BLECharacteristic::PROPERTY_NOTIFY
-    );
-    pTxCharacteristic->addDescriptor(new BLE2902());
-
-    // Create RX Characteristic (App -> ESP32)
-    BLECharacteristic* pRxCharacteristic = pService->createCharacteristic(
-        CHARACTERISTIC_UUID_RX,
-        BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR
-    );
-    pRxCharacteristic->setCallbacks(new MyCharacteristicCallbacks(this));
-
-    // Start Service
-    pService->start();
-
-    // Start Advertising
-    // CRITICAL FOR IOS: We must advertise the specific Service UUID
-    BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
-    pAdvertising->addServiceUUID(SERVICE_UUID);
-    pAdvertising->setScanResponse(true);
-    pAdvertising->setMinPreferred(0x06);  // Help with iPhone connection issues
-    pAdvertising->setMinPreferred(0x12);
-    BLEDevice::startAdvertising();
-
-    Serial.println("BLE Started. Waiting for a connection...");
-}
-
-void BluetoothController::initSPIFFS() {
-    // True = format on fail. Good for first-time use.
-    if (!SPIFFS.begin(true)) {
-        Serial.println("An Error has occurred while mounting SPIFFS");
-        return;
+    WiFi.mode(WIFI_AP);
+    bool ok = WiFi.softAP(apSsid, apPassword);
+    if (!ok) {
+        Serial.println("[WiFi] softAP failed");
     }
-    Serial.println("SPIFFS mounted successfully.");
+
+    IPAddress ip = WiFi.softAPIP();
+    Serial.print("[WiFi] AP started. SSID=");
+    Serial.print(apSsid);
+    Serial.print(" IP=");
+    Serial.println(ip);
+
+    ws.begin();
+    ws.onEvent([this](uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
+        this->handleWsEvent(num, type, payload, length);
+    });
+
+    Serial.println("[WS] WebSocket server listening on ws://192.168.4.1:81/");
 }
 
-
-// --- Connection Management ---
 bool BluetoothController::isConnectedToBT() {
     return deviceConnected;
 }
 
 void BluetoothController::setConnectionState(bool state) {
     deviceConnected = state;
-    if (state) {
-        Serial.println("Device Connected!");
-    } else {
-        Serial.println("Device Disconnected!");
-    }
 }
 
 void BluetoothController::handleIncomingData() {
-    // Handle disconnect event: restart advertising so iOS can see us again
-    if (!deviceConnected && oldDeviceConnected) {
-        delay(500); // Give the bluetooth stack the chance to get things ready
-        pServer->startAdvertising();
-        Serial.println("Restarted Advertising.");
-        oldDeviceConnected = deviceConnected;
-        
-        // Clean up any pending file transfers
-        if (ftState == FT_RECEIVING) {
-            cancelFileTransfer();
-        }
-    }
-    
-    // Handle connect event
-    if (deviceConnected && !oldDeviceConnected) {
-        oldDeviceConnected = deviceConnected;
-    }
+    ws.loop();
 }
 
-
-// --- Outgoing Data Transmissions ---
 void BluetoothController::sendData(const String& data) {
-    if (deviceConnected && pTxCharacteristic != nullptr) {
-        pTxCharacteristic->setValue(data.c_str());
-        pTxCharacteristic->notify();
-    }
+    if (!deviceConnected) return;
+    if (activeClient == 255) return;
+    ws.sendTXT(activeClient, data);
 }
 
 void BluetoothController::sendSongCompleted() {
-    String payload = "SONG_COMPLETED";
-    sendData(payload);
+    sendData("SONG_COMPLETED");
 }
 
-
-// --- Incoming Data & Command Parsing ---
 void BluetoothController::processReceivedData(uint8_t* data, size_t length) {
-    // Convert incoming packet to a string to check for interrupt commands
-    String textPayload = "";
-    for (size_t i = 0; i < length; i++) {
-        textPayload += (char)data[i];
-    }
-    textPayload.trim();
-    // Always allow the user to CANCEL, even if we are in the middle of a file
-    if (textPayload == "CANCEL") {
-        handleFileTransferCommand(textPayload);
-        return;
-    }
+    // Not used in WS implementation; kept for API compatibility
+    (void)data;
+    (void)length;
+}
 
-    // If we are receiving a file AND we haven't hit the target size yet, it's file data
-    if (ftState == FT_RECEIVING && bytesReceived < expectedFileSize) {
-        receiveFileData(data, length);
-    } 
-    else {
-        // Otherwise, treat the incoming packet as a command 
-        // (This catches the END command once bytesReceived >= expectedFileSize)
-        handleFileTransferCommand(textPayload);
+void BluetoothController::handleWsEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
+    switch (type) {
+        case WStype_CONNECTED: {
+            // Enforce single-client to reduce RAM
+            if (activeClient != 255 && activeClient != num) {
+                ws.disconnect(activeClient);
+            }
+            activeClient = num;
+            deviceConnected = true;
+            Serial.printf("[WS] Client %u connected\n", num);
+            sendData("HELLO");
+            break;
+        }
+        case WStype_DISCONNECTED: {
+            if (activeClient == num) {
+                activeClient = 255;
+                deviceConnected = false;
+            }
+            Serial.printf("[WS] Client %u disconnected\n", num);
+            if (ftState == FT_RECEIVING) {
+                cancelFileTransfer();
+            }
+            break;
+        }
+        case WStype_TEXT: {
+            String cmd;
+            cmd.reserve(length + 1);
+            for (size_t i = 0; i < length; i++) cmd += (char)payload[i];
+            cmd.trim();
+            handleFileTransferCommand(cmd);
+            break;
+        }
+        case WStype_BIN: {
+            // Treat as file data if receiving
+            if (ftState == FT_RECEIVING && bytesReceived < expectedFileSize) {
+                receiveFileData(payload, length);
+            }
+            break;
+        }
+        default:
+            break;
     }
 }
 
 void BluetoothController::handleFileTransferCommand(const String& command) {
-    // Expected Commands:
-    // START|<filename>|<filesize>
-    // END|<checksum>
-    // CANCEL
-    // LIST
-    // BPM:<bpm_value>
-    // START
-    
+    if (command == "CANCEL") {
+        cancelFileTransfer();
+        sendData("ACK_CANCEL");
+        return;
+    }
+
+    if (command == "LIST") {
+        listMIDFiles();
+        return;
+    }
+
+    if (command.startsWith("BPM:")) {
+        currentBPM = command.substring(4).toInt();
+        if (currentBPM == 0) currentBPM = 120;
+        Serial.printf("[WS] BPM=%u\n", currentBPM);
+        return;
+    }
+
+    if (command == "BEGINSONG") {
+        startCommandFlag = true;
+        Serial.println("[WS] BEGINSONG");
+        return;
+    }
+
     if (command.startsWith("START|")) {
         int firstPipe = command.indexOf('|');
         int secondPipe = command.indexOf('|', firstPipe + 1);
-        
         if (firstPipe > 0 && secondPipe > 0) {
             String filename = command.substring(firstPipe + 1, secondPipe);
             uint32_t fileSize = command.substring(secondPipe + 1).toInt();
-            
-            if (startFileTransfer(filename, fileSize)) {
-                sendData("ACK_START");
-            } else {
-                sendData("ERR_START");
-            }
+            if (startFileTransfer(filename, fileSize)) sendData("ACK_START");
+            else sendData("ERR_START");
         }
-    } 
-    else if (command.startsWith("END|")) {
+        return;
+    }
+
+    if (command.startsWith("END|")) {
         int firstPipe = command.indexOf('|');
         uint32_t checksum = command.substring(firstPipe + 1).toInt();
-        
-        if (endFileTransfer(checksum)) {
-            sendData("ACK_END");
-        } else {
-            sendData("ERR_CHECKSUM");
-        }
-    } 
-    else if (command == "CANCEL") {
-        cancelFileTransfer();
-        sendData("ACK_CANCEL");
-    }
-    else if (command == "LIST") {
-        listMIDFiles();
-    }
-    // ADDED: BPM Command Parsing
-    else if (command.startsWith("BPM:")) {
-        currentBPM = command.substring(4).toInt();
-        if (currentBPM == 0) currentBPM = 120; // Fallback so we don't divide by zero
-        Serial.printf("[BT] Received new BPM: %d\n", currentBPM);
-    }
-    // ADDED: Playback Start Command Parsing
-    else if (command.startsWith("BEGINSONG")) {
-        startCommandFlag = true;
-        Serial.println("[BT] Received playback START command");
+        if (endFileTransfer(checksum)) sendData("ACK_END");
+        else sendData("ERR_CHECKSUM");
+        return;
     }
 }
 
+bool BluetoothController::validateMIDFile(const char* filename) {
+    String fname(filename);
+    fname.toLowerCase();
+    return fname.endsWith(".mid");
+}
 
-// --- File Transfer Logic ---
+uint32_t BluetoothController::calculateChecksum(const uint8_t* data, size_t length) {
+    uint32_t sum = 0;
+    for (size_t i = 0; i < length; i++) sum += data[i];
+    return sum;
+}
+
+bool BluetoothController::fileSizeAvailable(uint32_t requiredSize) {
+    FSInfo info;
+    LittleFS.info(info);
+    uint32_t freeBytes = info.totalBytes - info.usedBytes;
+    return freeBytes > requiredSize;
+}
+
 bool BluetoothController::startFileTransfer(const String& filename, uint32_t fileSize) {
     if (fileSize > MAX_FILE_SIZE || !fileSizeAvailable(fileSize)) {
-        Serial.println("File too large or not enough space.");
+        Serial.println("[FS] File too large or not enough space");
         return false;
     }
 
     if (!validateMIDFile(filename.c_str())) {
-        Serial.println("Invalid file extension. Must be .mid");
+        Serial.println("[FS] Invalid file extension (.mid required)");
         return false;
     }
 
-    // Prepare full path
-    String fullPath = String(MID_FILE_DIR);
-    if (!filename.startsWith("/")) { fullPath += "/"; }
-    fullPath += filename;
+    // LittleFS doesn't have real directories; keep it as /midi_<name>.mid
+    String safe = filename;
+    safe.replace("/", "_");
 
-    currentFile = SPIFFS.open(fullPath, FILE_WRITE);
+    String fullPath = String(MID_FILE_DIR) + "_" + safe;
+    if (!fullPath.startsWith("/")) fullPath = "/" + fullPath;
+
+    currentFile = LittleFS.open(fullPath, "w");
     if (!currentFile) {
-        Serial.println("Failed to open file for writing");
+        Serial.println("[FS] Failed to open file for writing");
         return false;
     }
 
     currentFilename = fullPath;
     expectedFileSize = fileSize;
     bytesReceived = 0;
-    fileChecksum = 0; // Reset calculated checksum
+    fileChecksum = 0;
     ftState = FT_RECEIVING;
-    
-    Serial.printf("Starting transfer: %s (%d bytes)\n", fullPath.c_str(), fileSize);
+
+    Serial.printf("[FS] START %s (%u bytes)\n", fullPath.c_str(), (unsigned)fileSize);
     return true;
 }
 
 bool BluetoothController::receiveFileData(const uint8_t* buffer, size_t length) {
     if (ftState != FT_RECEIVING || !currentFile) return false;
 
-    size_t bytesWritten = currentFile.write(buffer, length);
-    if (bytesWritten != length) {
-        Serial.println("File write failed or partial write");
+    size_t written = currentFile.write(buffer, length);
+    if (written != length) {
+        Serial.println("[FS] Write failed");
         cancelFileTransfer();
         return false;
     }
 
-    // Accumulate a simple additive checksum for validation
     fileChecksum += calculateChecksum(buffer, length);
     bytesReceived += length;
 
-    // Check if we hit the expected file size
-    if (bytesReceived >= expectedFileSize) {
-        Serial.println("Expected bytes received. Waiting for END command.");
-        // We stay in FT_RECEIVING until the END command validates it
-    }
     return true;
 }
 
 bool BluetoothController::endFileTransfer(uint32_t checksum) {
     if (ftState != FT_RECEIVING) return false;
 
-    if (currentFile) {
-        currentFile.close();
-    }
+    if (currentFile) currentFile.close();
 
-    // Validate checksum and size
     if (bytesReceived == expectedFileSize && checksum == fileChecksum) {
         ftState = FT_COMPLETE;
         lastTransferredFilename = currentFilename;
         newFileTransferFlag = true;
-        Serial.println("File transfer complete and verified.");
+        Serial.println("[FS] Transfer complete OK");
         return true;
-    } else {
-        Serial.println("File transfer failed verification.");
-        SPIFFS.remove(currentFilename); // Delete corrupted file
-        ftState = FT_ERROR;
-        return false;
     }
+
+    Serial.println("[FS] Transfer verification failed");
+    LittleFS.remove(currentFilename);
+    ftState = FT_ERROR;
+    return false;
 }
 
 void BluetoothController::cancelFileTransfer() {
-    if (currentFile) {
-        currentFile.close();
-    }
-    if (currentFilename.length() > 0) {
-        SPIFFS.remove(currentFilename);
-    }
+    if (currentFile) currentFile.close();
+    if (currentFilename.length() > 0) LittleFS.remove(currentFilename);
+
     ftState = FT_IDLE;
     bytesReceived = 0;
     expectedFileSize = 0;
-    Serial.println("File transfer cancelled.");
+    currentFilename = "";
+    Serial.println("[FS] Transfer cancelled");
 }
 
-
-// --- File Management ---
 void BluetoothController::listMIDFiles() {
-    File root = SPIFFS.open("/");
-    File file = root.openNextFile();
-    
-    String fileList = "FILES:";
-    while (file) {
-        String fname = file.name();
-        if (fname.indexOf(".mid") > 0 || fname.indexOf(".MID") > 0) {
-            fileList += fname + "," + String(file.size()) + ";";
-        }
-        file = root.openNextFile();
-    }
-    sendData(fileList);
+    // LittleFS doesn't provide efficient directory iteration in the same way across cores.
+    // Provide a minimal response; app can track uploads or we can implement a simple index file later.
+    FSInfo info;
+    LittleFS.info(info);
+    String resp = "FILES_UNSUPPORTED;FREE=" + String(info.totalBytes - info.usedBytes);
+    sendData(resp);
 }
 
 bool BluetoothController::deleteMIDFile(const char* filename) {
-    String fullPath = String(filename);
-    if (!fullPath.startsWith("/")) fullPath = "/" + fullPath;
-    
-    if (SPIFFS.exists(fullPath)) {
-        return SPIFFS.remove(fullPath);
-    }
-    return false;
+    String path(filename);
+    if (!path.startsWith("/")) path = "/" + path;
+    return LittleFS.remove(path);
 }
 
 String BluetoothController::getLastMIDFile() {
     return lastTransferredFilename;
 }
 
-bool BluetoothController::fileSizeAvailable(uint32_t requiredSize) {
-    uint32_t totalBytes = SPIFFS.totalBytes();
-    uint32_t usedBytes = SPIFFS.usedBytes();
-    return (totalBytes - usedBytes) > requiredSize;
-}
-
-
-// --- State Checks ---
 String BluetoothController::checkNewFileTransfer() {
     if (newFileTransferFlag) {
         newFileTransferFlag = false;
-        ftState = FT_IDLE; // Reset state back to idle after acknowledging
+        ftState = FT_IDLE;
         return lastTransferredFilename;
     }
     return "";
@@ -377,32 +310,14 @@ String BluetoothController::getLastTransferredFile() const {
     return lastTransferredFilename;
 }
 
-// --- ADDED: Playback Specific State Checks ---
 uint16_t BluetoothController::getBPM() const {
     return currentBPM;
 }
 
 bool BluetoothController::checkStartCommand() {
     if (startCommandFlag) {
-        startCommandFlag = false; // Reset the flag automatically upon reading
+        startCommandFlag = false;
         return true;
     }
     return false;
-}
-
-
-// --- Private Helpers ---
-bool BluetoothController::validateMIDFile(const char* filename) {
-    String fname = String(filename);
-    fname.toLowerCase();
-    return fname.endsWith(".mid");
-}
-
-uint32_t BluetoothController::calculateChecksum(const uint8_t* data, size_t length) {
-    // Simple additive checksum modulo 32-bit limit
-    uint32_t sum = 0;
-    for (size_t i = 0; i < length; i++) {
-        sum += data[i];
-    }
-    return sum;
 }
